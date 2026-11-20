@@ -52,6 +52,21 @@ object ChaoxingDeviceInfoHelper {
             buildDeviceInfo(context, deviceModel).toJSONString().toByteArray(Charsets.UTF_8)
         )
 
+    fun getDeviceInfoSnapshot(context: Context): JSONObject = buildDeviceInfo(context)
+
+    fun isChaoxingClientInstalled(context: Context): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(
+                chaoxingClientInfo.packageName,
+                PackageManager.PackageInfoFlags.of(0L)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(chaoxingClientInfo.packageName, 0)
+        }
+        true
+    }.getOrDefault(false)
+
     fun decryptClientId(clientId: String): JSONObject? =
         runCatching {
             val encrypted = Base64.decode(clientId, Base64.DEFAULT)
@@ -116,6 +131,29 @@ object ChaoxingDeviceInfoHelper {
                 ).build()
             }
         }.loginSession.deviceCode
+    }
+
+    suspend fun updateLoginSessionDeviceCode(
+        context: Context,
+        deviceCode: String,
+        isNotRandomized: Boolean
+    ) {
+        val dataStore = context.chaoxingDataStore.updateData { currentDataStore ->
+            currentDataStore.toBuilder().setLoginSession(
+                currentDataStore.loginSession.toBuilder()
+                    .setDeviceCode(deviceCode)
+                    .setIsNotRandomizedDeviceCode(isNotRandomized && deviceCode.isNotEmpty())
+                    .setIsDeviceCodeDuplicatedSignBefore(false)
+                    .build()
+            ).build()
+        }
+        val phoneNumber = dataStore.loginSession.phoneNumber
+        ChaoxingHttpClient.instance?.takeIf { it.phoneNumber == phoneNumber }?.let { client ->
+            client.deviceCode = deviceCode
+        }
+        ChaoxingHttpClient.cloneInstance?.takeIf { it.phoneNumber == phoneNumber }?.let { client ->
+            client.deviceCode = deviceCode
+        }
     }
 
     fun randomizedDeviceCode(): String {
