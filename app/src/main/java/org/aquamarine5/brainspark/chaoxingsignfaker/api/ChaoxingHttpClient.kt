@@ -240,21 +240,7 @@ class ChaoxingHttpClient internal constructor(
                     }
                 }
             }
-            val client = OkHttpClient.Builder()
-                .cookieJar(cookieJar)
-                .retryOnConnectionFailure(true)
-                .addInterceptor { chain ->
-                    chain.proceed(
-                        chain.request().run {
-                            if (headers.none { it.first == "User-Agent" }) {
-                                newBuilder()
-                                    .header("User-Agent", chaoxingUserAgent)
-                                    .build()
-                            } else this
-                        }
-                    )
-                }
-                .build()
+            val client = buildLoginOkHttpClient(cookieJar)
             login(client, phoneNumber, password, context)
             val session = context.chaoxingDataStore.data.first().loginSession
             val (userEntity, puid) = getInfoWithIdentity(client, context, phoneNumber)
@@ -279,6 +265,68 @@ class ChaoxingHttpClient internal constructor(
                 puid = puid,
                 deviceCode = session.deviceCode.takeIf { it.isNotEmpty() }
                     ?: ChaoxingDeviceInfoHelper.getCachedLocalMachineDeviceCode(context),
+                initialConfiguredFid = effectiveConfiguredFid,
+                okHttpClient = client,
+            ).apply {
+                instance = this
+                ChaoxingHttpRequesterPool.put(this)
+            }
+        }
+
+        private fun buildLoginOkHttpClient(cookieJar: CookieJar): OkHttpClient =
+            OkHttpClient.Builder()
+                .cookieJar(cookieJar)
+                .retryOnConnectionFailure(true)
+                .addInterceptor { chain ->
+                    chain.proceed(
+                        chain.request().run {
+                            if (headers.none { it.first == "User-Agent" }) {
+                                newBuilder()
+                                    .header("User-Agent", chaoxingUserAgent)
+                                    .build()
+                            } else this
+                        }
+                    )
+                }
+                .build()
+
+        suspend fun beginQRLogin(context: Context): ChaoxingQRLoginSession =
+            withContext(Dispatchers.IO) {
+                ChaoxingQRLoginSession(buildLoginOkHttpClient(ChaoxingCookieJar()))
+                    .apply { refresh() }
+            }
+
+        suspend fun finishQRLogin(
+            context: Context,
+            session: ChaoxingQRLoginSession
+        ): ChaoxingHttpClient = withContext(Dispatchers.IO) {
+            val client = session.okHttpClient
+            val (userEntity, puid) = getInfoWithIdentity(client, context, "")
+            val accountKey = userEntity.uname?.takeIf { it.isNotBlank() } ?: puid.toString()
+            val deviceCode = ChaoxingDeviceInfoHelper.getCachedLocalMachineDeviceCode(context)
+            val effectiveConfiguredFid = userEntity.fidList.firstOrNull()?.first
+                ?: throw ChaoxingGetUserInfoException("无法获取账号所属的学校单位")
+            context.chaoxingDataStore.updateData { dataStore ->
+                dataStore.toBuilder().setLoginSession(
+                    ChaoxingLoginSession.newBuilder()
+                        .setPhoneNumber(accountKey)
+                        .setName(userEntity.name)
+                        .setPuid(puid)
+                        .setConfiguredFid(effectiveConfiguredFid)
+                        .setDeviceCode(deviceCode)
+                        .setIsNotRandomizedDeviceCode(false)
+                        .addAllCookies(
+                            (client.cookieJar as ChaoxingCookieJar).snapshotChaoxingCookies()
+                        )
+                        .build()
+                ).build()
+            }
+            UMengHelper.profileSignIn(puid, userEntity.name, accountKey)
+            ChaoxingHttpClient(
+                userEntity = userEntity.copy(phoneNumber = accountKey),
+                name = userEntity.name,
+                puid = puid,
+                deviceCode = deviceCode,
                 initialConfiguredFid = effectiveConfiguredFid,
                 okHttpClient = client,
             ).apply {
