@@ -117,12 +117,18 @@ private fun DeviceInfoDiagnosticDialog(onDismissRequest: () -> Unit) {
             val clientId = ChaoxingHttpClient.instance?.userEntity?.clientId
             val clientIdInfo = clientId?.let { ChaoxingDeviceInfoHelper.decryptClientId(it) }
             buildList {
-                add("客户端包名" to chaoxingApplicationPackageName)
+                add("客户端包名" to chaoxingClientInfo.packageName)
                 add(
                     "客户端已安装" to if (ChaoxingDeviceInfoHelper.isChaoxingClientInstalled(context))
                         "是" else "否（登录可能无法上报设备信息）"
                 )
-                add("UserAgent" to chaoxingUserAgent)
+                add("uniqueId（会话）" to loginSession.uniqueId.ifEmpty { "(空)" })
+                add(
+                    "UserAgent" to (
+                        ChaoxingHttpClient.instance?.userAgent
+                            ?: chaoxingClientInfo.userAgentTemplate
+                        )
+                )
                 add("型号 / 品牌" to "${Build.MODEL} / ${Build.BRAND}")
                 add("系统版本" to Build.VERSION.RELEASE)
                 add("FINGERPRINT" to Build.FINGERPRINT)

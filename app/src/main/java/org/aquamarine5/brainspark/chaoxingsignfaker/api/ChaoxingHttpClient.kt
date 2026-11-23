@@ -25,7 +25,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.aquamarine5.brainspark.chaoxingsignfaker.components.chaoxingUserAgent
+import org.aquamarine5.brainspark.chaoxingsignfaker.components.chaoxingClientInfo
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingLoginSession
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingOtherUserSession
 import org.aquamarine5.brainspark.chaoxingsignfaker.datastore.ChaoxingSignFakerDataStore
@@ -56,6 +56,8 @@ class ChaoxingHttpClient internal constructor(
     deviceCode: String,
     initialConfiguredFid: Int,
     okHttpClient: OkHttpClient,
+    sessionUniqueId: String,
+    sessionDeviceModel: String,
 ) : ChaoxingHttpRequester(
     okHttpClient = okHttpClient,
     phoneNumber = userEntity.phoneNumber,
@@ -63,6 +65,8 @@ class ChaoxingHttpClient internal constructor(
     puid = puid,
     deviceCode = deviceCode,
     initialConfiguredFid = initialConfiguredFid,
+    sessionUniqueId = sessionUniqueId,
+    sessionDeviceModel = sessionDeviceModel,
 ) {
     suspend fun updateConfiguredFid(context: Context, fid: Int) {
         requirePredictable(userEntity.fidList.any { it.first == fid }) { "请选择账号所属的学校单位" }
@@ -191,7 +195,9 @@ class ChaoxingHttpClient internal constructor(
             }
         }
 
-        @Deprecated("Use ChaoxingDeviceInfoHelper.randomizedDeviceCode() instead")
+        @Deprecated("Use ChaoxingDeviceInfoHelper.randomizedDeviceCode() instead",
+            ReplaceWith("ChaoxingDeviceInfoHelper.randomizedDeviceCode()")
+        )
         fun generateDeviceCode(): String = ChaoxingDeviceInfoHelper.randomizedDeviceCode()
 
         private fun checkPasswordIllegalThrowException(password: String) {
@@ -217,6 +223,8 @@ class ChaoxingHttpClient internal constructor(
             context: Context
         ): ChaoxingHttpClient = withContext(Dispatchers.IO) {
             checkPasswordIllegalThrowException(password)
+            val sessionUniqueId = ChaoxingDeviceInfoHelper.getOrRandomUniqueId(context, phoneNumber)
+            val sessionDeviceModel = ChaoxingDeviceInfoHelper.localDeviceModel()
             val cookieJar: CookieJar = object : CookieJar {
                 private val cookieStore: MutableMap<String, List<Cookie>> = mutableMapOf()
                 private var chaoxingCookieSession: List<Cookie> = listOf()
@@ -240,8 +248,8 @@ class ChaoxingHttpClient internal constructor(
                     }
                 }
             }
-            val client = buildLoginOkHttpClient(cookieJar)
-            login(client, phoneNumber, password, context)
+            val client = buildLoginOkHttpClient(cookieJar, sessionUniqueId, sessionDeviceModel)
+            login(client, phoneNumber, password, context, uniqueId = sessionUniqueId)
             val session = context.chaoxingDataStore.data.first().loginSession
             val (userEntity, puid) = getInfoWithIdentity(client, context, phoneNumber)
             UMengHelper.profileSignIn(puid, userEntity.name, phoneNumber)
@@ -267,13 +275,19 @@ class ChaoxingHttpClient internal constructor(
                     ?: ChaoxingDeviceInfoHelper.getCachedLocalMachineDeviceCode(context),
                 initialConfiguredFid = effectiveConfiguredFid,
                 okHttpClient = client,
+                sessionUniqueId = sessionUniqueId,
+                sessionDeviceModel = sessionDeviceModel,
             ).apply {
                 instance = this
                 ChaoxingHttpRequesterPool.put(this)
             }
         }
 
-        private fun buildLoginOkHttpClient(cookieJar: CookieJar): OkHttpClient =
+        private fun buildLoginOkHttpClient(
+            cookieJar: CookieJar,
+            sessionUniqueId: String = "",
+            sessionDeviceModel: String = ChaoxingDeviceInfoHelper.localDeviceModel()
+        ): OkHttpClient =
             OkHttpClient.Builder()
                 .cookieJar(cookieJar)
                 .retryOnConnectionFailure(true)
@@ -282,7 +296,13 @@ class ChaoxingHttpClient internal constructor(
                         chain.request().run {
                             if (headers.none { it.first == "User-Agent" }) {
                                 newBuilder()
-                                    .header("User-Agent", chaoxingUserAgent)
+                                    .header(
+                                        "User-Agent",
+                                        chaoxingClientInfo.resolveUserAgent(
+                                            sessionUniqueId,
+                                            sessionDeviceModel
+                                        )
+                                    )
                                     .build()
                             } else this
                         }
@@ -292,8 +312,12 @@ class ChaoxingHttpClient internal constructor(
 
         suspend fun beginQRLogin(context: Context): ChaoxingQRLoginSession =
             withContext(Dispatchers.IO) {
-                ChaoxingQRLoginSession(buildLoginOkHttpClient(ChaoxingCookieJar()))
-                    .apply { refresh() }
+                ChaoxingQRLoginSession(
+                    buildLoginOkHttpClient(
+                        ChaoxingCookieJar(),
+                        ChaoxingDeviceInfoHelper.randomUniqueId()
+                    )
+                ).apply { refresh() }
             }
 
         suspend fun finishQRLogin(
@@ -303,6 +327,9 @@ class ChaoxingHttpClient internal constructor(
             val client = session.okHttpClient
             val (userEntity, puid) = getInfoWithIdentity(client, context, "")
             val accountKey = userEntity.uname?.takeIf { it.isNotBlank() } ?: puid.toString()
+            val sessionUniqueId =
+                ChaoxingDeviceInfoHelper.getOrRandomUniqueId(context, accountKey)
+            val sessionDeviceModel = ChaoxingDeviceInfoHelper.localDeviceModel()
             val deviceCode = ChaoxingDeviceInfoHelper.getCachedLocalMachineDeviceCode(context)
             val effectiveConfiguredFid = userEntity.fidList.firstOrNull()?.first
                 ?: throw ChaoxingGetUserInfoException("无法获取账号所属的学校单位")
@@ -314,6 +341,7 @@ class ChaoxingHttpClient internal constructor(
                         .setPuid(puid)
                         .setConfiguredFid(effectiveConfiguredFid)
                         .setDeviceCode(deviceCode)
+                        .setUniqueId(sessionUniqueId)
                         .setIsNotRandomizedDeviceCode(false)
                         .addAllCookies(
                             (client.cookieJar as ChaoxingCookieJar).snapshotChaoxingCookies()
@@ -329,6 +357,8 @@ class ChaoxingHttpClient internal constructor(
                 deviceCode = deviceCode,
                 initialConfiguredFid = effectiveConfiguredFid,
                 okHttpClient = client,
+                sessionUniqueId = sessionUniqueId,
+                sessionDeviceModel = sessionDeviceModel,
             ).apply {
                 instance = this
                 ChaoxingHttpRequesterPool.put(this)
@@ -387,7 +417,10 @@ class ChaoxingHttpClient internal constructor(
                             .url(URL_USER_INFO)
                             .apply {
                                 runCatching {
-                                    ChaoxingDeviceInfoHelper.buildEncryptedDeviceInfo(context)
+                                    ChaoxingDeviceInfoHelper.buildEncryptedDeviceInfo(
+                                        context,
+                                        otherUserSession?.deviceModel
+                                    )
                                 }.onSuccess {
                                     post(
                                         FormBody.Builder().apply {
@@ -592,8 +625,20 @@ class ChaoxingHttpClient internal constructor(
                     }.build())
                     .build()
 
+                val knownUniqueId =
+                    ChaoxingDeviceInfoHelper.getOrRandomUniqueId(context, phoneNumber)
+                val knownDeviceModel =
+                    ChaoxingDeviceInfoHelper.getOrRandomDeviceModel(context, phoneNumber)
+                val sessionUserAgent =
+                    chaoxingClientInfo.resolveUserAgent(knownUniqueId, knownDeviceModel)
                 val tempOkHttpClient =
                     instance!!.okHttpClient.newBuilder()
+                        .addInterceptor { chain ->
+                            chain.proceed(
+                                chain.request().newBuilder()
+                                    .header("User-Agent", sessionUserAgent).build()
+                            )
+                        }
                         .cookieJar(object : CookieJar {
                             private val cookieStore: MutableMap<String, List<Cookie>> =
                                 mutableMapOf()
@@ -634,7 +679,9 @@ class ChaoxingHttpClient internal constructor(
                     return@withContext ChaoxingOtherUserSharedEntity(
                         phoneNumber,
                         encryptedPassword,
-                        getInfo(tempOkHttpClient, context, phoneNumber).name
+                        getInfo(tempOkHttpClient, context, phoneNumber).name,
+                        uniqueId = knownUniqueId,
+                        deviceModel = knownDeviceModel,
                     )
                 }
             }
@@ -645,7 +692,8 @@ class ChaoxingHttpClient internal constructor(
             password: String,
             context: Context,
             isSaveToDataStore: Boolean = true,
-            isEncryptedPassword: Boolean = false
+            isEncryptedPassword: Boolean = false,
+            uniqueId: String? = null
         ): Unit =
             withContext(Dispatchers.IO) {
                 if (!isEncryptedPassword) checkPasswordIllegalThrowException(password)
@@ -705,6 +753,7 @@ class ChaoxingHttpClient internal constructor(
                                 )
                                 .setPassword(encryptedPassword)
                                 .setPhoneNumber(phoneNumber)
+                                .apply { uniqueId?.let { setUniqueId(it) } }
                                 .build()
                         ).build()
                     }
